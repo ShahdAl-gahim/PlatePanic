@@ -1,7 +1,8 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-// MARK: - Minimal Model Types
+// MARK: - Minimal Model Types hey there
+
 
 enum GameState {
     case startScreen
