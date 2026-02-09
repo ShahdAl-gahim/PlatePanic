@@ -3,24 +3,17 @@ import UniformTypeIdentifiers
 
 // MARK: - Minimal Model Types
 
-enum GameState {
+enum GameState: Equatable {
     case startScreen
-    case inRound
-    case finished
+    case inLevel
+    case levelComplete
+    case gameOver
 }
 
-enum ItemType: String, CaseIterable {
+enum ItemType: String, CaseIterable, Equatable {
     case pancakes = "Pancakes"
     case croissant = "Croissant"
     case cupcakes = "Cupcakes"
-
-    var requiredIngredient: DraggableToken { .batter }
-    var requiredStation: StationType {
-        switch self {
-        case .pancakes: return .pan
-        case .croissant, .cupcakes: return .oven
-        }
-    }
 
     var cookTimeSeconds: TimeInterval {
         switch self {
@@ -47,17 +40,11 @@ enum ItemType: String, CaseIterable {
     }
 
     var finishedIcon: String {
+        // Placeholder SF Symbols — swap to your real assets later
         switch self {
         case .pancakes: return "birthday.cake.fill"
-        case .croissant: return "moon.stars.fill" // placeholder
-        case .cupcakes: return "cup.and.saucer.fill" // placeholder
-        }
-    }
-
-    var stationPlaceholderIcon: String {
-        switch self {
-        case .pancakes: return "square.fill" // pan placeholder
-        case .croissant, .cupcakes: return "oven.fill" // might not exist; fallback handled
+        case .croissant: return "moon.stars.fill"
+        case .cupcakes: return "cup.and.saucer.fill"
         }
     }
 }
@@ -69,11 +56,6 @@ enum DraggableToken: String, CaseIterable, Equatable {
     case cupcakes
 }
 
-enum StationType {
-    case pan
-    case oven
-}
-
 enum StationState: Equatable {
     case empty
     case cooking
@@ -83,9 +65,10 @@ enum StationState: Equatable {
 struct Player {
     var name: String = "Player"
     var money: Int = 0
+    var level: Int = 1
 }
 
-struct Customer: Identifiable {
+struct Customer: Identifiable, Equatable {
     let id = UUID()
     var order: ItemType
     var hasBeenServed: Bool = false
@@ -98,50 +81,58 @@ struct ContentView: View {
     @State private var gameState: GameState = .startScreen
     @State private var player = Player()
 
-    // Option B: Queue of customers
+    // Level queue
     @State private var customers: [Customer] = []
     @State private var currentCustomerIndex: Int = 0
 
     @State private var stationState: StationState = .empty
+
+    // UI feedback
     @State private var showPaidBanner: Bool = false
     @State private var lastPayout: Int = 0
+
+    // MARK: - Derived
 
     private var currentCustomer: Customer? {
         guard customers.indices.contains(currentCustomerIndex) else { return nil }
         return customers[currentCustomerIndex]
     }
 
-    private var currentOrder: ItemType? {
-        currentCustomer?.order
-    }
-
-    private var isCurrentCustomerServed: Bool {
-        currentCustomer?.hasBeenServed ?? false
-    }
+    private var currentOrder: ItemType? { currentCustomer?.order }
+    private var isCurrentCustomerServed: Bool { currentCustomer?.hasBeenServed ?? false }
 
     private var canDragBatter: Bool {
-        guard gameState == .inRound, let order = currentOrder else { return false }
-        return stationState == .empty && !isCurrentCustomerServed && order.requiredIngredient == .batter
+        gameState == .inLevel && stationState == .empty && !isCurrentCustomerServed
     }
 
     private var canDragFinishedItem: Bool {
-        guard gameState == .inRound, let order = currentOrder else { return false }
+        guard gameState == .inLevel, let order = currentOrder else { return false }
         if case .finished(let token) = stationState {
             return token == order.finishedToken && !isCurrentCustomerServed
         }
         return false
     }
 
+    // MARK: - Body
+
     var body: some View {
         VStack(spacing: 18) {
-            HeaderView(money: player.money, progressText: progressText)
+            HeaderView(
+                money: player.money,
+                level: player.level,
+                progressText: progressText,
+                showQuit: gameState == .inLevel || gameState == .levelComplete,
+                onQuit: quitToStart
+            )
 
             Group {
                 switch gameState {
                 case .startScreen:
-                    StartScreenView(onStart: startNewGame)
+                    StartScreenView(
+                        onStart: startNewGame
+                    )
 
-                case .inRound:
+                case .inLevel:
                     RoundView(
                         orderName: currentOrder?.rawValue ?? "—",
                         stationTitle: stationTitle,
@@ -152,14 +143,24 @@ struct ContentView: View {
                         paidText: "Paid $\(lastPayout) ✅",
                         canDragBatter: canDragBatter,
                         canDragFinishedItem: canDragFinishedItem,
-                        finishedItemName: finishedItemName,
-                        finishedItemIcon: finishedItemIcon,
+                        finishedItemName: currentOrder?.rawValue ?? "Item",
+                        finishedItemIcon: currentOrder?.finishedIcon ?? "birthday.cake.fill",
+                        finishedToken: currentOrder?.finishedToken ?? .pancakes,
                         onDropBatterOnStation: handleDropBatterOnStation,
                         onDropFinishedOnCustomer: handleDropFinishedOnCustomer
                     )
 
-                case .finished:
-                    FinishedView(totalMoney: player.money, onPlayAgain: resetToStart)
+                case .levelComplete:
+                    LevelCompleteView(
+                        level: player.level,
+                        totalMoney: player.money,
+                        onNextLevel: advanceToNextLevel,
+                        onQuit: quitToStart
+                    )
+
+                case .gameOver:
+                    // Not used right now, but kept for easy future expansion.
+                    FinishedView(totalMoney: player.money, onBackToStart: quitToStart)
                 }
             }
 
@@ -171,21 +172,19 @@ struct ContentView: View {
         .animation(.default, value: showPaidBanner)
     }
 
-    // MARK: - Header
+    // MARK: - Header Helpers
 
     private var progressText: String {
-        if gameState == .inRound {
-            let served = min(currentCustomerIndex, customers.count)
-            return "Customer \(served + 1) / \(max(customers.count, 1))"
-        }
-        return ""
+        guard gameState == .inLevel else { return "" }
+        let current = min(currentCustomerIndex + 1, max(customers.count, 1))
+        return "Customer \(current) / \(max(customers.count, 1))"
     }
 
     // MARK: - Station UI Strings
 
     private var stationTitle: String {
         switch stationState {
-        case .empty: return stationTypeLabel
+        case .empty: return "Station"
         case .cooking: return "Cooking…"
         case .finished: return "Ready"
         }
@@ -194,84 +193,71 @@ struct ContentView: View {
     private var stationSubtitle: String {
         guard let order = currentOrder else { return "" }
         switch stationState {
-        case .empty:
-            return "Drop Batter Here"
-        case .cooking:
-            return "Wait for it…"
-        case .finished:
-            return "Drag \(order.rawValue) to Customer"
-        }
-    }
-
-    private var stationTypeLabel: String {
-        guard let order = currentOrder else { return "Station" }
-        switch order.requiredStation {
-        case .pan: return "Pan"
-        case .oven: return "Oven"
+        case .empty: return "Drop Batter Here"
+        case .cooking: return "Wait for it…"
+        case .finished: return "Drag \(order.rawValue) to Customer"
         }
     }
 
     private var stationSystemImage: String {
         guard let order = currentOrder else { return "square.fill" }
-
         switch stationState {
         case .empty:
-            // Use simple placeholders that exist on all platforms
-            switch order.requiredStation {
-            case .pan:
-                return "square.fill" // placeholder pan
-            case .oven:
-                return "rectangle.fill" // placeholder oven
-            }
+            return "square.fill" // placeholder station
         case .cooking:
             return "flame.fill"
         case .finished:
-            return finishedItemIcon
+            return order.finishedIcon
         }
     }
 
-    private var finishedItemName: String {
-        currentOrder?.rawValue ?? "Item"
-    }
-
-    private var finishedItemIcon: String {
-        guard let order = currentOrder else { return "birthday.cake.fill" }
-        return order.finishedIcon
-    }
-
-    // MARK: - Game Lifecycle
+    // MARK: - Game / Level Flow
 
     private func startNewGame() {
-        // Create a simple queue: 2 customers with different orders
-        // (Change these anytime)
-        customers = [
-            Customer(order: .pancakes),
-            Customer(order: .croissant)
-        ]
+        player.money = 0
+        player.level = 1
+        startLevel(level: player.level)
+        gameState = .inLevel
+    }
+
+    private func startLevel(level: Int) {
+        // Level N has N random customers
+        customers = (0..<max(level, 1)).map { _ in
+            Customer(order: ItemType.allCases.randomElement() ?? .pancakes)
+        }
         currentCustomerIndex = 0
         stationState = .empty
         showPaidBanner = false
         lastPayout = 0
-
-        // Reset player money for a new run (prototype)
-        player.money = 0
-
-        gameState = .inRound
     }
 
-    private func resetToStart() {
+    private func advanceToNextLevel() {
+        player.level += 1
+        startLevel(level: player.level)
+        gameState = .inLevel
+    }
+
+    private func completeLevel() {
+        // Show a simple level complete screen
+        gameState = .levelComplete
+    }
+
+    private func quitToStart() {
+        // Quit at any time
         gameState = .startScreen
         customers = []
         currentCustomerIndex = 0
         stationState = .empty
         showPaidBanner = false
         lastPayout = 0
+        // Keep it simple: quitting resets progression to start screen.
+        // (If you want “continue where you left off” later, we can keep player.level.)
     }
 
     // MARK: - Drop Handlers
 
     private func handleDropBatterOnStation() {
-        guard gameState == .inRound,
+        guard gameState == .inLevel,
               stationState == .empty,
               let order = currentOrder,
               !isCurrentCustomerServed else { return }
@@ -279,46 +265,44 @@ struct ContentView: View {
         stationState = .cooking
 
         DispatchQueue.main.asyncAfter(deadline: .now() + order.cookTimeSeconds) {
-            if gameState == .inRound, stationState == .cooking {
+            // Don’t finish cooking if we quit / moved states
+            if gameState == .inLevel && stationState == .cooking {
                 stationState = .finished(order.finishedToken)
             }
         }
     }
 
     private func handleDropFinishedOnCustomer() {
-        guard gameState == .inRound,
+        guard gameState == .inLevel,
               let order = currentOrder else { return }
 
-        // Must be holding the correct finished token in station
         guard case .finished(let token) = stationState, token == order.finishedToken else { return }
         guard !isCurrentCustomerServed else { return }
 
-        // Mark served
+        // Serve current customer
         customers[currentCustomerIndex].hasBeenServed = true
 
         // Pay
         lastPayout = order.payout
         player.money += order.payout
 
-        // Show small feedback then advance
+        // Small feedback then advance
         showPaidBanner = true
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
             showPaidBanner = false
-            advanceToNextCustomerOrFinish()
+            advanceToNextCustomerOrCompleteLevel()
         }
     }
 
-    private func advanceToNextCustomerOrFinish() {
-        // Reset station for next customer
+    private func advanceToNextCustomerOrCompleteLevel() {
         stationState = .empty
 
         let nextIndex = currentCustomerIndex + 1
         if nextIndex >= customers.count {
-            gameState = .finished
+            completeLevel()
         } else {
             currentCustomerIndex = nextIndex
-            // stays inRound; UI updates to show next order
         }
     }
 }
@@ -327,22 +311,36 @@ struct ContentView: View {
 
 private struct HeaderView: View {
     let money: Int
+    let level: Int
     let progressText: String
+    let showQuit: Bool
+    let onQuit: () -> Void
 
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text("PlatePanic (Prototype)")
                     .font(.headline)
+                Text("Level \(level)")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                 if !progressText.isEmpty {
                     Text(progressText)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
             }
+
             Spacer()
+
             Text("Money: $\(money)")
                 .font(.subheadline)
+
+            if showQuit {
+                Button("Quit") { onQuit() }
+                    .buttonStyle(.bordered)
+                    .padding(.leading, 8)
+            }
         }
     }
 }
@@ -357,6 +355,40 @@ private struct StartScreenView: View {
 
             Button("Start", action: onStart)
                 .buttonStyle(.borderedProminent)
+
+            Text("Level 1: 1 customer • Level 2: 2 customers • Level 3: 3 customers…")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.top, 6)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 30)
+    }
+}
+
+private struct LevelCompleteView: View {
+    let level: Int
+    let totalMoney: Int
+    let onNextLevel: () -> Void
+    let onQuit: () -> Void
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Text("Level \(level) Complete 🎉")
+                .font(.title2)
+                .bold()
+
+            Text("Total money: $\(totalMoney)")
+                .font(.body)
+
+            HStack(spacing: 12) {
+                Button("Next Level", action: onNextLevel)
+                    .buttonStyle(.borderedProminent)
+
+                Button("Quit", action: onQuit)
+                    .buttonStyle(.bordered)
+            }
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 30)
@@ -365,17 +397,17 @@ private struct StartScreenView: View {
 
 private struct FinishedView: View {
     let totalMoney: Int
-    let onPlayAgain: () -> Void
+    let onBackToStart: () -> Void
 
     var body: some View {
         VStack(spacing: 14) {
-            Text("Game Complete 🎉")
+            Text("Game Over")
                 .font(.title2)
                 .bold()
 
             Text("Total earned: $\(totalMoney).")
 
-            Button("Back to Start", action: onPlayAgain)
+            Button("Back to Start", action: onBackToStart)
                 .buttonStyle(.borderedProminent)
         }
         .frame(maxWidth: .infinity)
@@ -397,8 +429,10 @@ private struct RoundView: View {
 
     let canDragBatter: Bool
     let canDragFinishedItem: Bool
+
     let finishedItemName: String
     let finishedItemIcon: String
+    let finishedToken: DraggableToken
 
     let onDropBatterOnStation: () -> Void
     let onDropFinishedOnCustomer: () -> Void
@@ -419,7 +453,7 @@ private struct RoundView: View {
 
             HStack(alignment: .top, spacing: 14) {
 
-                // Ingredients / Items
+                // Items
                 VStack(spacing: 10) {
                     Text("Items")
                         .font(.subheadline)
@@ -436,12 +470,12 @@ private struct RoundView: View {
                         title: finishedItemName,
                         systemImage: finishedItemIcon,
                         enabled: canDragFinishedItem,
-                        token: tokenForFinishedName(finishedItemName)
+                        token: finishedToken
                     )
                 }
                 .frame(maxWidth: .infinity)
 
-                // Station
+                // Station (drop batter here)
                 VStack(spacing: 10) {
                     Text("Station")
                         .font(.subheadline)
@@ -460,7 +494,7 @@ private struct RoundView: View {
                 }
                 .frame(maxWidth: .infinity)
 
-                // Customer
+                // Customer (drop finished item here)
                 VStack(spacing: 10) {
                     Text("Customer")
                         .font(.subheadline)
@@ -473,8 +507,6 @@ private struct RoundView: View {
                         isActive: !customerServed,
                         accepts: [.pancakes, .croissant, .cupcakes],
                         onAccept: { _ in
-                            // We validate correctness via station state in ContentView;
-                            // if user drops a finished item here, it will attempt serve.
                             onDropFinishedOnCustomer()
                         }
                     )
@@ -486,17 +518,6 @@ private struct RoundView: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .padding(.top, 6)
-        }
-    }
-
-    private func tokenForFinishedName(_ name: String) -> DraggableToken {
-        // This keeps the view simple; ContentView already ensures which item is "ready".
-        // The string comes from ItemType.rawValue, so map based on known names.
-        switch name {
-        case ItemType.pancakes.rawValue: return .pancakes
-        case ItemType.croissant.rawValue: return .croissant
-        case ItemType.cupcakes.rawValue: return .cupcakes
-        default: return .pancakes
         }
     }
 }
