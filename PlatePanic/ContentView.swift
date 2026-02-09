@@ -1,10 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-// MARK: - Minimal Model Types hey there I am exhausted I'm excited
-
-
-
+// MARK: - Minimal Model Types
 
 enum GameState {
     case startScreen
@@ -12,19 +9,75 @@ enum GameState {
     case finished
 }
 
-enum ItemType: String {
+enum ItemType: String, CaseIterable {
     case pancakes = "Pancakes"
+    case croissant = "Croissant"
+    case cupcakes = "Cupcakes"
+
+    var requiredIngredient: DraggableToken { .batter }
+    var requiredStation: StationType {
+        switch self {
+        case .pancakes: return .pan
+        case .croissant, .cupcakes: return .oven
+        }
+    }
+
+    var cookTimeSeconds: TimeInterval {
+        switch self {
+        case .pancakes: return 1.2
+        case .croissant: return 1.6
+        case .cupcakes: return 1.8
+        }
+    }
+
+    var payout: Int {
+        switch self {
+        case .pancakes: return 10
+        case .croissant: return 14
+        case .cupcakes: return 16
+        }
+    }
+
+    var finishedToken: DraggableToken {
+        switch self {
+        case .pancakes: return .pancakes
+        case .croissant: return .croissant
+        case .cupcakes: return .cupcakes
+        }
+    }
+
+    var finishedIcon: String {
+        switch self {
+        case .pancakes: return "birthday.cake.fill"
+        case .croissant: return "moon.stars.fill" // placeholder
+        case .cupcakes: return "cup.and.saucer.fill" // placeholder
+        }
+    }
+
+    var stationPlaceholderIcon: String {
+        switch self {
+        case .pancakes: return "square.fill" // pan placeholder
+        case .croissant, .cupcakes: return "oven.fill" // might not exist; fallback handled
+        }
+    }
 }
 
-enum DraggableToken: String {
+enum DraggableToken: String, CaseIterable, Equatable {
     case batter
     case pancakes
+    case croissant
+    case cupcakes
 }
 
-enum PanState {
+enum StationType {
+    case pan
+    case oven
+}
+
+enum StationState: Equatable {
     case empty
-    case hasBatter
-    case finishedPancakes
+    case cooking
+    case finished(DraggableToken)
 }
 
 struct Player {
@@ -32,9 +85,9 @@ struct Player {
     var money: Int = 0
 }
 
-struct Customer {
-    var order: ItemType = .pancakes
-    var moneyToPay: Int = 10
+struct Customer: Identifiable {
+    let id = UUID()
+    var order: ItemType
     var hasBeenServed: Bool = false
 }
 
@@ -44,36 +97,69 @@ struct ContentView: View {
 
     @State private var gameState: GameState = .startScreen
     @State private var player = Player()
-    @State private var customer = Customer()
-    @State private var panState: PanState = .empty
 
-    private var canDragBatter: Bool { gameState == .inRound && panState == .empty && !customer.hasBeenServed }
-    private var canDragPancakes: Bool { gameState == .inRound && panState == .finishedPancakes && !customer.hasBeenServed }
+    // Option B: Queue of customers
+    @State private var customers: [Customer] = []
+    @State private var currentCustomerIndex: Int = 0
+
+    @State private var stationState: StationState = .empty
+    @State private var showPaidBanner: Bool = false
+    @State private var lastPayout: Int = 0
+
+    private var currentCustomer: Customer? {
+        guard customers.indices.contains(currentCustomerIndex) else { return nil }
+        return customers[currentCustomerIndex]
+    }
+
+    private var currentOrder: ItemType? {
+        currentCustomer?.order
+    }
+
+    private var isCurrentCustomerServed: Bool {
+        currentCustomer?.hasBeenServed ?? false
+    }
+
+    private var canDragBatter: Bool {
+        guard gameState == .inRound, let order = currentOrder else { return false }
+        return stationState == .empty && !isCurrentCustomerServed && order.requiredIngredient == .batter
+    }
+
+    private var canDragFinishedItem: Bool {
+        guard gameState == .inRound, let order = currentOrder else { return false }
+        if case .finished(let token) = stationState {
+            return token == order.finishedToken && !isCurrentCustomerServed
+        }
+        return false
+    }
 
     var body: some View {
         VStack(spacing: 18) {
-            HeaderView(money: player.money)
+            HeaderView(money: player.money, progressText: progressText)
 
             Group {
                 switch gameState {
                 case .startScreen:
-                    StartScreenView(onStart: startNewRound)
+                    StartScreenView(onStart: startNewGame)
 
                 case .inRound:
                     RoundView(
-                        orderName: customer.order.rawValue,
+                        orderName: currentOrder?.rawValue ?? "—",
+                        stationTitle: stationTitle,
+                        stationSubtitle: stationSubtitle,
+                        stationSystemImage: stationSystemImage,
+                        customerServed: isCurrentCustomerServed,
+                        showPaidBanner: showPaidBanner,
+                        paidText: "Paid $\(lastPayout) ✅",
                         canDragBatter: canDragBatter,
-                        canDragPancakes: canDragPancakes,
-                        panTitle: panTitle,
-                        panSubtitle: panSubtitle,
-                        panSystemImage: panSystemImage,
-                        customerServed: customer.hasBeenServed,
-                        onDropBatterOnPan: handleDropBatterOnPan,
-                        onDropPancakesOnCustomer: handleDropPancakesOnCustomer
+                        canDragFinishedItem: canDragFinishedItem,
+                        finishedItemName: finishedItemName,
+                        finishedItemIcon: finishedItemIcon,
+                        onDropBatterOnStation: handleDropBatterOnStation,
+                        onDropFinishedOnCustomer: handleDropFinishedOnCustomer
                     )
 
                 case .finished:
-                    FinishedView(earned: customer.moneyToPay, onPlayAgain: startNewRound)
+                    FinishedView(totalMoney: player.money, onPlayAgain: resetToStart)
                 }
             }
 
@@ -81,79 +167,179 @@ struct ContentView: View {
         }
         .padding()
         .animation(.default, value: gameState)
-        .animation(.default, value: panState)
+        .animation(.default, value: stationState)
+        .animation(.default, value: showPaidBanner)
     }
 
-    // MARK: - Computed UI Strings
+    // MARK: - Header
 
-    private var panTitle: String {
-        switch panState {
-        case .empty: return "Empty"
-        case .hasBatter: return "Cooking…"
-        case .finishedPancakes: return "Pancakes Ready"
+    private var progressText: String {
+        if gameState == .inRound {
+            let served = min(currentCustomerIndex, customers.count)
+            return "Customer \(served + 1) / \(max(customers.count, 1))"
+        }
+        return ""
+    }
+
+    // MARK: - Station UI Strings
+
+    private var stationTitle: String {
+        switch stationState {
+        case .empty: return stationTypeLabel
+        case .cooking: return "Cooking…"
+        case .finished: return "Ready"
         }
     }
 
-    private var panSubtitle: String {
-        switch panState {
-        case .empty: return "Drop Batter Here"
-        case .hasBatter: return "Wait for it…"
-        case .finishedPancakes: return "Drag Pancakes to Customer"
-        }
-    }
-
-    private var panSystemImage: String {
-        switch panState {
+    private var stationSubtitle: String {
+        guard let order = currentOrder else { return "" }
+        switch stationState {
         case .empty:
-            return "square.fill"          // placeholder pan
-        case .hasBatter:
-            return "flame.fill"           // cooking
-        case .finishedPancakes:
-            return "birthday.cake.fill"   // placeholder pancakes
+            return "Drop Batter Here"
+        case .cooking:
+            return "Wait for it…"
+        case .finished:
+            return "Drag \(order.rawValue) to Customer"
         }
     }
 
-    // MARK: - Game Logic
+    private var stationTypeLabel: String {
+        guard let order = currentOrder else { return "Station" }
+        switch order.requiredStation {
+        case .pan: return "Pan"
+        case .oven: return "Oven"
+        }
+    }
 
-    private func startNewRound() {
-        customer = Customer(order: .pancakes, moneyToPay: 10, hasBeenServed: false)
-        panState = .empty
+    private var stationSystemImage: String {
+        guard let order = currentOrder else { return "square.fill" }
+
+        switch stationState {
+        case .empty:
+            // Use simple placeholders that exist on all platforms
+            switch order.requiredStation {
+            case .pan:
+                return "square.fill" // placeholder pan
+            case .oven:
+                return "rectangle.fill" // placeholder oven
+            }
+        case .cooking:
+            return "flame.fill"
+        case .finished:
+            return finishedItemIcon
+        }
+    }
+
+    private var finishedItemName: String {
+        currentOrder?.rawValue ?? "Item"
+    }
+
+    private var finishedItemIcon: String {
+        guard let order = currentOrder else { return "birthday.cake.fill" }
+        return order.finishedIcon
+    }
+
+    // MARK: - Game Lifecycle
+
+    private func startNewGame() {
+        // Create a simple queue: 2 customers with different orders
+        // (Change these anytime)
+        customers = [
+            Customer(order: .pancakes),
+            Customer(order: .croissant)
+        ]
+        currentCustomerIndex = 0
+        stationState = .empty
+        showPaidBanner = false
+        lastPayout = 0
+
+        // Reset player money for a new run (prototype)
+        player.money = 0
+
         gameState = .inRound
     }
 
-    private func handleDropBatterOnPan() {
-        guard gameState == .inRound, panState == .empty else { return }
+    private func resetToStart() {
+        gameState = .startScreen
+        customers = []
+        currentCustomerIndex = 0
+        stationState = .empty
+        showPaidBanner = false
+        lastPayout = 0
+    }
 
-        panState = .hasBatter
+    // MARK: - Drop Handlers
 
-        // simple fake cook time
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-            if gameState == .inRound && panState == .hasBatter {
-                panState = .finishedPancakes
+    private func handleDropBatterOnStation() {
+        guard gameState == .inRound,
+              stationState == .empty,
+              let order = currentOrder,
+              !isCurrentCustomerServed else { return }
+
+        stationState = .cooking
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + order.cookTimeSeconds) {
+            if gameState == .inRound, stationState == .cooking {
+                stationState = .finished(order.finishedToken)
             }
         }
     }
 
-    private func handleDropPancakesOnCustomer() {
+    private func handleDropFinishedOnCustomer() {
         guard gameState == .inRound,
-              panState == .finishedPancakes,
-              customer.hasBeenServed == false else { return }
+              let order = currentOrder else { return }
 
-        customer.hasBeenServed = true
-        player.money += customer.moneyToPay
-        gameState = .finished
+        // Must be holding the correct finished token in station
+        guard case .finished(let token) = stationState, token == order.finishedToken else { return }
+        guard !isCurrentCustomerServed else { return }
+
+        // Mark served
+        customers[currentCustomerIndex].hasBeenServed = true
+
+        // Pay
+        lastPayout = order.payout
+        player.money += order.payout
+
+        // Show small feedback then advance
+        showPaidBanner = true
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            showPaidBanner = false
+            advanceToNextCustomerOrFinish()
+        }
+    }
+
+    private func advanceToNextCustomerOrFinish() {
+        // Reset station for next customer
+        stationState = .empty
+
+        let nextIndex = currentCustomerIndex + 1
+        if nextIndex >= customers.count {
+            gameState = .finished
+        } else {
+            currentCustomerIndex = nextIndex
+            // stays inRound; UI updates to show next order
+        }
     }
 }
 
-// MARK: - Subviews (still in same file)
+// MARK: - Subviews (same file)
 
 private struct HeaderView: View {
     let money: Int
+    let progressText: String
 
     var body: some View {
         HStack {
-            Text("Prototype Cooking Game")
-                .font(.headline)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("PlatePanic (Prototype)")
+                    .font(.headline)
+                if !progressText.isEmpty {
+                    Text(progressText)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
             Spacer()
             Text("Money: $\(money)")
                 .font(.subheadline)
@@ -178,18 +364,18 @@ private struct StartScreenView: View {
 }
 
 private struct FinishedView: View {
-    let earned: Int
+    let totalMoney: Int
     let onPlayAgain: () -> Void
 
     var body: some View {
         VStack(spacing: 14) {
-            Text("Round Complete 🎉")
+            Text("Game Complete 🎉")
                 .font(.title2)
                 .bold()
 
-            Text("You earned $\(earned).")
+            Text("Total earned: $\(totalMoney).")
 
-            Button("Play Again", action: onPlayAgain)
+            Button("Back to Start", action: onPlayAgain)
                 .buttonStyle(.borderedProminent)
         }
         .frame(maxWidth: .infinity)
@@ -199,51 +385,82 @@ private struct FinishedView: View {
 
 private struct RoundView: View {
     let orderName: String
-    let canDragBatter: Bool
-    let canDragPancakes: Bool
 
-    let panTitle: String
-    let panSubtitle: String
-    let panSystemImage: String
+    let stationTitle: String
+    let stationSubtitle: String
+    let stationSystemImage: String
 
     let customerServed: Bool
 
-    let onDropBatterOnPan: () -> Void
-    let onDropPancakesOnCustomer: () -> Void
+    let showPaidBanner: Bool
+    let paidText: String
+
+    let canDragBatter: Bool
+    let canDragFinishedItem: Bool
+    let finishedItemName: String
+    let finishedItemIcon: String
+
+    let onDropBatterOnStation: () -> Void
+    let onDropFinishedOnCustomer: () -> Void
 
     var body: some View {
         VStack(spacing: 18) {
             OrderCard(orderName: orderName)
 
+            if showPaidBanner {
+                Text(paidText)
+                    .font(.headline)
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 12)
+                    .background(.thinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .transition(.opacity)
+            }
+
             HStack(alignment: .top, spacing: 14) {
+
+                // Ingredients / Items
                 VStack(spacing: 10) {
-                    Text("Ingredients")
+                    Text("Items")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
 
-                    DraggableCard(title: "Batter", systemImage: "drop.fill", enabled: canDragBatter, token: .batter)
-                    DraggableCard(title: "Pancakes", systemImage: "birthday.cake.fill", enabled: canDragPancakes, token: .pancakes)
+                    DraggableCard(
+                        title: "Batter",
+                        systemImage: "drop.fill",
+                        enabled: canDragBatter,
+                        token: .batter
+                    )
+
+                    DraggableCard(
+                        title: finishedItemName,
+                        systemImage: finishedItemIcon,
+                        enabled: canDragFinishedItem,
+                        token: tokenForFinishedName(finishedItemName)
+                    )
                 }
                 .frame(maxWidth: .infinity)
 
+                // Station
                 VStack(spacing: 10) {
-                    Text("Pan")
+                    Text("Station")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
 
                     DropZoneCard(
-                        title: panTitle,
-                        systemImage: panSystemImage,
-                        subtitle: panSubtitle,
+                        title: stationTitle,
+                        systemImage: stationSystemImage,
+                        subtitle: stationSubtitle,
                         isActive: true,
                         accepts: [.batter],
                         onAccept: { token in
-                            if token == .batter { onDropBatterOnPan() }
+                            if token == .batter { onDropBatterOnStation() }
                         }
                     )
                 }
                 .frame(maxWidth: .infinity)
 
+                // Customer
                 VStack(spacing: 10) {
                     Text("Customer")
                         .font(.subheadline)
@@ -252,21 +469,34 @@ private struct RoundView: View {
                     DropZoneCard(
                         title: customerServed ? "Served ✅" : "Waiting",
                         systemImage: "person.fill",
-                        subtitle: customerServed ? "Thanks!" : "Drop Pancakes Here",
+                        subtitle: customerServed ? "Thanks!" : "Drop \(finishedItemName) Here",
                         isActive: !customerServed,
-                        accepts: [.pancakes],
-                        onAccept: { token in
-                            if token == .pancakes { onDropPancakesOnCustomer() }
+                        accepts: [.pancakes, .croissant, .cupcakes],
+                        onAccept: { _ in
+                            // We validate correctness via station state in ContentView;
+                            // if user drops a finished item here, it will attempt serve.
+                            onDropFinishedOnCustomer()
                         }
                     )
                 }
                 .frame(maxWidth: .infinity)
             }
 
-            Text("Goal: Drag Batter → Pan, then Pancakes → Customer.")
+            Text("Goal: Drag Batter → Station, then finished item → Customer.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .padding(.top, 6)
+        }
+    }
+
+    private func tokenForFinishedName(_ name: String) -> DraggableToken {
+        // This keeps the view simple; ContentView already ensures which item is "ready".
+        // The string comes from ItemType.rawValue, so map based on known names.
+        switch name {
+        case ItemType.pancakes.rawValue: return .pancakes
+        case ItemType.croissant.rawValue: return .croissant
+        case ItemType.cupcakes.rawValue: return .cupcakes
+        default: return .pancakes
         }
     }
 }
@@ -370,7 +600,5 @@ private struct DropZoneCard: View {
 
         return false
     }
-
 }
 
-                  
